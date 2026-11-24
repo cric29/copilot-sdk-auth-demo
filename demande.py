@@ -1,6 +1,7 @@
 # demande.py — premier essai du Copilot SDK (microsoft-copilot-sdk 2.0.1)
 import asyncio
 import os
+import sys
 
 from copilot import CopilotClient
 from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
@@ -8,7 +9,12 @@ from copilot.session import PermissionNoResult
 from copilot.session_events import AssistantMessageData, PermissionRequestRead
 
 # Fichier joint à la question : un petit module de chartier (65 lignes)
-FICHIER = r"C:\chartier-ci\api_py\tuiles.py"
+FICHIER = sys.argv[1] if len(sys.argv) > 1 else r"C:\chartier-ci\api_py\tuiles.py"
+QUESTION = (
+    sys.argv[2]
+    if len(sys.argv) > 2
+    else "Explique en français, en cinq lignes, ce que fait ce module et pourquoi il a deux moteurs."
+)
 
 
 def autoriser_lecture(request, invocation):
@@ -34,8 +40,7 @@ async def main():
             permissions={"on_request": autoriser_lecture},
         ) as session:
             reponse = await session.send_and_wait(
-                "Explique en français, en cinq lignes, ce que fait ce module "
-                "et pourquoi il a deux moteurs.",
+                QUESTION,
                 attachments=[{"type": "file", "path": FICHIER}],
                 timeout=180,  # 3 min : le premier lancement télécharge le moteur
             )
