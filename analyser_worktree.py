@@ -8,12 +8,15 @@ import sys
 from pathlib import Path
 
 from copilot import CopilotClient
-from copilot.session import (
-    PermissionDecisionApproveOnce,
-    PermissionDecisionReject,
-    PermissionNoResult,
+from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
+from copilot.session import PermissionNoResult
+from copilot.session_events import (
+    AssistantMessageData,
+    PermissionRequestMcp,
+    PermissionRequestRead,
 )
-from copilot.session_events import AssistantMessageData, PermissionRequestRead
+
+CONTEXT7_TOOLS = ("resolve-library-id", "query-docs")
 
 
 def trouver_racine_worktree(path: Path) -> Path:
@@ -44,10 +47,50 @@ def obtenir_etat_git(worktree: Path) -> str:
         text=True,
         check=True,
     )
+    diff = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--no-ext-diff", "--no-color", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    untracked = subprocess.run(
+        ["git", "-C", str(worktree), "ls-files", "--others", "--exclude-standard", "-z"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    diff_parts = [diff.stdout]
+    for path in filter(None, untracked.stdout.split("\0")):
+        untracked_diff = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--no-color",
+                "/dev/null",
+                str(worktree / path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if untracked_diff.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(
+                untracked_diff.returncode,
+                untracked_diff.args,
+                untracked_diff.stdout,
+                untracked_diff.stderr,
+            )
+        diff_parts.append(untracked_diff.stdout)
+    diff_text = "\n".join(part for part in diff_parts if part.strip())
     return (
         f"État Git (--short --branch) :\n{status.stdout.strip() or '(aucun changement)'}\n\n"
         f"Statistiques des changements (git diff --stat HEAD) :\n"
-        f"{diffstat.stdout.strip() or '(aucune différence suivie)'}"
+        f"{diffstat.stdout.strip() or '(aucune différence suivie)'}\n\n"
+        f"Diff textuel complet contre HEAD :\n{diff_text or '(aucune différence)'}"
     )
 
 
@@ -57,6 +100,13 @@ def autoriser_lecture_dans(worktree: Path):
     def autoriser_lecture(request, invocation):
         if getattr(request, "managed_approval_required", False):
             return PermissionNoResult()
+        if isinstance(request, PermissionRequestMcp):
+            if (
+                request.server_name == "context7"
+                and request.tool_name in CONTEXT7_TOOLS
+            ):
+                return PermissionDecisionApproveOnce()
+            return PermissionDecisionReject()
         if not isinstance(request, PermissionRequestRead):
             return PermissionDecisionReject()
 
@@ -89,8 +139,15 @@ async def analyser(worktree: Path, question: str) -> str:
 
     async with CopilotClient(mode="coding-agent") as client:
         async with await client.create_session(
-            tools={"available_tools": ["builtin:view"]},
+            tools={
+                "available_tools": [
+                    "builtin:view",
+                    "mcp__context7__resolve-library-id",
+                    "mcp__context7__query-docs",
+                ]
+            },
             permissions={"on_request": autoriser_lecture_dans(worktree)},
+            enable_config_discovery=True,
         ) as session:
             response = await session.send_and_wait(prompt, timeout=300)
 
